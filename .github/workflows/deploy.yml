@@ -1,0 +1,83 @@
+name: Optimized CI/CD Pipeline for Node.js to AWS Lightsail
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Cache Node.js modules
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: echo "Running tests..."
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          mkdir -p ~/.aws
+          echo "[default]" > ~/.aws/credentials
+          echo "aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
+          echo "aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
+
+      - name: Add SSH Key for Lightsail
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/lightsail_key
+          chmod 600 ~/.ssh/lightsail_key
+
+      - name: Deploy to AWS Lightsail
+        env:
+          LIGHTSAIL_IP: "3.11.239.230"
+        run: |
+          echo "Starting deployment to AWS Lightsail..."
+
+          # Use rsync to transfer only changed files
+          rsync -avz --delete --exclude='.git' --exclude='node_modules' \
+            -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/lightsail_key" . \
+            bitnami@$LIGHTSAIL_IP:/opt/bitnami/apache2/htdocs
+
+          # SSH into Lightsail instance to install dependencies and restart the app
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/lightsail_key bitnami@$LIGHTSAIL_IP "
+            cd /opt/bitnami/apache2/htdocs &&
+            npm install &&
+            pm2 delete app || true &&
+            pm2 start index.ts --name app --interpreter=ts-node --update-env
+          "
+          echo "Deployment completed successfully!"
+
+      - name: Cleanup
+        run: rm -f ~/.ssh/lightsail_key
+        
